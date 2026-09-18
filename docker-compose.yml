@@ -1,0 +1,14 @@
+services:
+  api:
+    build: .
+    image: md-link-checker
+    ports:
+      - "8000:8000"
+    environment:
+      LINKCHECK_DB: /data/linkcheck.db
+    volumes:
+      - linkcheck-data:/data
+    restart: unless-stopped
+
+volumes:
+  linkcheck-data:
