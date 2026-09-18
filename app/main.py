@@ -10,16 +10,18 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from .checker import check_files, normalize_path, summarize
 from .db import Store
 from .models import CheckOut, CheckRequest, CheckSummary
+from .suggest import attach_suggestions
 
 DB_PATH = os.environ.get("LINKCHECK_DB", "linkcheck.db")
 
 app = FastAPI(
     title="Markdown Link Checker",
-    version="1.0.0",
+    version="1.1.0",
     description=(
         "Checks a submitted collection of Markdown files for broken cross-file "
         "links: missing targets, duplicate heading anchors, paths escaping the "
-        "document root, and self-referencing links. Results are stored in "
+        "document root, and self-referencing links. On request, missing targets "
+        "come with ranked fix suggestions (suggest=true). Results are stored in "
         "SQLite and can be retrieved by check ID. No external services required."
     ),
 )
@@ -35,13 +37,25 @@ def get_store() -> Store:
     return _store
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok"}
 
 
 @app.post("/checks", response_model=CheckOut, status_code=201)
-def create_check(req: CheckRequest, store: Store = Depends(get_store)) -> CheckOut:
+def create_check(
+    req: CheckRequest,
+    suggest: bool | None = Query(
+        default=None,
+        description="Attach ranked fix suggestions to missing_target diagnostics. "
+                    "Defaults to the LINKCHECK_SUGGEST env var (off when unset).",
+    ),
+    store: Store = Depends(get_store),
+) -> CheckOut:
     """Submit a Markdown file collection, run the check, persist and return it."""
     files: dict[str, str] = {}
     errors: list[str] = []
@@ -57,6 +71,10 @@ def create_check(req: CheckRequest, store: Store = Depends(get_store)) -> CheckO
         raise HTTPException(status_code=422, detail=errors)
 
     diagnostics = check_files(files)
+    if suggest is None:
+        suggest = _env_flag("LINKCHECK_SUGGEST")
+    if suggest:
+        attach_suggestions(files, diagnostics)
     check_id = uuid.uuid4().hex[:16]
     created_at = datetime.now(timezone.utc).isoformat()
     summary = summarize(diagnostics)

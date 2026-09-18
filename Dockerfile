@@ -10,7 +10,8 @@ RUN pip install -r requirements.txt
 
 COPY app ./app
 
-ENV LINKCHECK_DB=/data/linkcheck.db
+ENV LINKCHECK_DB=/data/linkcheck.db \
+    LINKCHECK_SUGGEST=0
 RUN mkdir -p /data
 
 EXPOSE 8000

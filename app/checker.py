@@ -10,9 +10,13 @@ import bisect
 import posixpath
 import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 from .parser import ParsedFile, parse_markdown
+
+if TYPE_CHECKING:
+    from .suggest import Suggestion
 
 MISSING_TARGET = "missing_target"
 DUPLICATE_ANCHOR = "duplicate_anchor"
@@ -33,7 +37,8 @@ class Diagnostic:
     line: int            # 1-based line number in the source file
     link: str            # the link exactly as written ("#anchor" for duplicates)
     message: str
-    resolved: str | None = None  # normalized target path, if resolvable
+    resolved: str | None = None      # normalized target path, if resolvable
+    suggestion: Suggestion | None = None  # fix candidates (missing_target only)
 
     def as_dict(self) -> dict:
         return {
@@ -43,6 +48,9 @@ class Diagnostic:
             "link": self.link,
             "resolved": self.resolved,
             "message": self.message,
+            "suggestion": (
+                self.suggestion.as_dict() if self.suggestion is not None else None
+            ),
         }
 
 

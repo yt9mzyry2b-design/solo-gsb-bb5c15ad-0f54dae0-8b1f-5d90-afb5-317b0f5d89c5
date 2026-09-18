@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS diagnostics (
     line       INTEGER NOT NULL,
     link       TEXT NOT NULL,
     resolved   TEXT,
-    message    TEXT NOT NULL
+    message    TEXT NOT NULL,
+    suggestion TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_diagnostics_check_id ON diagnostics(check_id);
 """
@@ -37,6 +38,14 @@ class Store:
         self.db_path = db_path
         with self._conn() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """Bring databases created by older versions up to date."""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(diagnostics)")}
+        if "suggestion" not in cols:
+            conn.execute("ALTER TABLE diagnostics ADD COLUMN suggestion TEXT")
 
     @contextmanager
     def _conn(self) -> sqlite3.Connection:
@@ -65,10 +74,15 @@ class Store:
             )
             conn.executemany(
                 "INSERT INTO diagnostics"
-                " (check_id, type, source, line, link, resolved, message)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " (check_id, type, source, line, link, resolved, message, suggestion)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 [
-                    (check_id, d.type, d.source, d.line, d.link, d.resolved, d.message)
+                    (
+                        check_id, d.type, d.source, d.line, d.link, d.resolved,
+                        d.message,
+                        json.dumps(d.suggestion.as_dict())
+                        if d.suggestion is not None else None,
+                    )
                     for d in diagnostics
                 ],
             )
@@ -79,8 +93,8 @@ class Store:
             if row is None:
                 return None
             diags = conn.execute(
-                "SELECT type, source, line, link, resolved, message FROM diagnostics"
-                " WHERE check_id = ? ORDER BY id",
+                "SELECT type, source, line, link, resolved, message, suggestion"
+                " FROM diagnostics WHERE check_id = ? ORDER BY id",
                 (check_id,),
             ).fetchall()
         return {
@@ -89,7 +103,21 @@ class Store:
             "file_count": row["file_count"],
             "diagnostic_count": row["diagnostic_count"],
             "summary": json.loads(row["summary"]),
-            "diagnostics": [dict(d) for d in diags],
+            "diagnostics": [
+                {
+                    "type": d["type"],
+                    "source": d["source"],
+                    "line": d["line"],
+                    "link": d["link"],
+                    "resolved": d["resolved"],
+                    "message": d["message"],
+                    "suggestion": (
+                        json.loads(d["suggestion"])
+                        if d["suggestion"] is not None else None
+                    ),
+                }
+                for d in diags
+            ],
         }
 
     def list_checks(self, limit: int = 50) -> list[dict]:

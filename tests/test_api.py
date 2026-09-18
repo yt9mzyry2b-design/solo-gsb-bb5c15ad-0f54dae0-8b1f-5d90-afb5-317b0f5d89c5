@@ -139,3 +139,90 @@ def test_clean_collection_has_no_diagnostics(client):
 def test_health(client):
     c, _ = client
     assert c.get("/health").json() == {"status": "ok"}
+
+
+def test_suggest_true_attaches_and_persists_suggestions(client):
+    c, _ = client
+    resp = c.post("/checks?suggest=true", json={
+        "files": [{"path": p, "content": content} for p, content in FILES.items()]
+    })
+    assert resp.status_code == 201
+    body = resp.json()
+    by_link = {(d["source"], d["link"]): d for d in body["diagnostics"]}
+
+    missing_file = by_link[("README.md", "docs/nope.md")]["suggestion"]
+    assert missing_file["status"] == "auto_suggestion"
+    best = missing_file["candidates"][0]
+    assert best["path"] == "docs/guide.md"
+    assert best["anchor"] is None
+    assert best["score"] == best["path_distance"] + best["anchor_distance"] == 1
+
+    missing_anchor = by_link[("docs/guide.md", "#nope")]["suggestion"]
+    assert missing_anchor["status"] == "ambiguous"
+    assert len(missing_anchor["candidates"]) <= 3
+
+    for d in body["diagnostics"]:
+        if d["type"] != "missing_target":
+            assert d["suggestion"] is None
+
+    # suggestions are persisted: GET returns the identical payload
+    assert c.get(f"/checks/{body['check_id']}").json() == body
+
+
+def test_suggest_defaults_to_off(client):
+    c, _ = client
+    body = post_files(c).json()
+    assert all(d["suggestion"] is None for d in body["diagnostics"])
+
+
+def test_suggest_explicit_false_overrides_env(client, monkeypatch):
+    monkeypatch.setenv("LINKCHECK_SUGGEST", "1")
+    c, _ = client
+    body = c.post("/checks?suggest=false", json={
+        "files": [{"path": p, "content": content} for p, content in FILES.items()]
+    }).json()
+    assert all(d["suggestion"] is None for d in body["diagnostics"])
+
+
+def test_suggest_default_via_env(client, monkeypatch):
+    monkeypatch.setenv("LINKCHECK_SUGGEST", "1")
+    c, _ = client
+    body = post_files(c).json()
+    missing = [d for d in body["diagnostics"] if d["type"] == "missing_target"]
+    assert missing
+    assert all(d["suggestion"] is not None for d in missing)
+
+
+def test_store_migrates_pre_suggestion_schema(tmp_path):
+    import sqlite3
+
+    from app.checker import check_files
+    from app.suggest import attach_suggestions
+
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.executescript("""
+        CREATE TABLE checks (
+            id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+            file_count INTEGER NOT NULL, diagnostic_count INTEGER NOT NULL,
+            summary TEXT NOT NULL
+        );
+        CREATE TABLE diagnostics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            check_id TEXT NOT NULL, type TEXT NOT NULL, source TEXT NOT NULL,
+            line INTEGER NOT NULL, link TEXT NOT NULL, resolved TEXT,
+            message TEXT NOT NULL
+        );
+    """)
+    conn.close()
+
+    store = Store(str(db))  # opening migrates the old schema
+    files = {"a.md": "# A\n\n[gone](docs/gne.md)\n", "docs/guide.md": "# Guide\n"}
+    diagnostics = check_files(files)
+    attach_suggestions(files, diagnostics)
+    store.save_check("c1", "2026-09-18T00:00:00+00:00", len(files),
+                     {"missing_target": 1}, diagnostics)
+    result = store.get_check("c1")
+    assert result["diagnostics"][0]["suggestion"]["status"] == "auto_suggestion"
+    best = result["diagnostics"][0]["suggestion"]["candidates"][0]
+    assert best["path"] == "docs/guide.md"

@@ -1,6 +1,6 @@
 # Markdown Link Checker
 
-一个自包含的 Markdown 文档链接检查 API：客户端提交一组带路径的 Markdown 文件，服务解析标题锚点、相对路径与显式 fragment，按规范化路径解析跨文件引用并输出诊断。结果持久化在 SQLite 中，可按检查 ID 查询。除 Python 依赖外无任何外部服务（无网络校验、无外部数据库）。
+一个自包含的 Markdown 文档链接检查 API：客户端提交一组带路径的 Markdown 文件，服务解析标题锚点、相对路径与显式 fragment，按规范化路径解析跨文件引用并输出诊断；可选地为缺失目标生成修复建议。结果持久化在 SQLite 中，可按检查 ID 查询。除 Python 依赖外无任何外部服务（无网络校验、无外部数据库）。
 
 ## 诊断类型
 
@@ -11,7 +11,19 @@
 | `path_escape` | 相对路径经规范化后越出提交的文档根（如 `../../secret.md`） |
 | `self_reference` | 自循环引用：链接指向文件自身，或指向链接所在章节自己的锚点 |
 
-每条诊断都包含：`source`（来源文件）、`line`（1 起始行号）、`link`（文档中原始写法，可复现）、`resolved`（规范化后的目标路径，可空）和 `message`。
+每条诊断都包含：`source`（来源文件）、`line`（1 起始行号）、`link`（文档中原始写法，可复现）、`resolved`（规范化后的目标路径，可空）、`message` 和 `suggestion`（修复建议，未请求时为 `null`）。
+
+## 修复建议（可选）
+
+`POST /checks?suggest=true` 会在检查完成后为每条 `missing_target` 诊断计算修复建议；设置环境变量 `LINKCHECK_SUGGEST=1` 可将其变为默认行为（显式 `?suggest=false` 可覆盖）。建议随诊断一并写入 SQLite，`GET /checks/{id}` 原样返回。
+
+评分规则完全确定、可手工复现：
+
+- **路径距离**（`path_distance`）：断链目标与候选文件的 `/` 分段序列之间的编辑距离——增、删、替换一个完整路径段各计 1。例如 `docs/nope.md` → `docs/guide.md` 距离为 1。
+- **锚点距离**（`anchor_distance`）：链接 fragment 与候选文件中最接近锚点之间的字符级编辑距离；链接无 fragment 时计 0，候选文件没有任何锚点时计 fragment 的长度。
+- **score**：`path_distance + anchor_distance`。
+
+提交集合中的每个文件都是候选；按 `(score, 完整路径)` 升序排序后取前 3 个。当最佳候选唯一（第二名 score 严格更大）且其 score 不超过阈值 2 时，`status` 为 `auto_suggestion`，否则为 `ambiguous`。候选数量上限（3）与阈值（2）是 `app/suggest.py` 中的常量 `MAX_CANDIDATES` 与 `AUTO_THRESHOLD`。
 
 ## 快速开始
 
@@ -21,7 +33,7 @@
 docker compose up --build
 ```
 
-服务监听 <http://localhost:8000>，交互式文档在 <http://localhost:8000/docs>。SQLite 数据库保存在名为 `linkcheck-data` 的卷中（容器内路径 `/data/linkcheck.db`）。
+服务监听 <http://localhost:8000>，交互式文档在 <http://localhost:8000/docs>。SQLite 数据库保存在名为 `linkcheck-data` 的卷中（容器内路径 `/data/linkcheck.db`）。Compose 配置默认开启修复建议（`LINKCHECK_SUGGEST=1`）。
 
 ### 本地运行
 
@@ -31,14 +43,14 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-数据库路径由环境变量 `LINKCHECK_DB` 控制，默认 `./linkcheck.db`。
+数据库路径由环境变量 `LINKCHECK_DB` 控制，默认 `./linkcheck.db`；`LINKCHECK_SUGGEST=1` 时 `POST /checks` 默认附带修复建议（可用 `?suggest=false` 关闭），未设置时默认关闭（可用 `?suggest=true` 开启）。
 
 ## API 使用
 
 ### `POST /checks` — 提交文件集合并执行检查
 
 ```bash
-curl -s -X POST http://localhost:8000/checks \
+curl -s -X POST 'http://localhost:8000/checks?suggest=true' \
   -H 'Content-Type: application/json' \
   -d '{
     "files": [
@@ -69,7 +81,14 @@ curl -s -X POST http://localhost:8000/checks \
       "line": 3,
       "link": "docs/nope.md",
       "resolved": "docs/nope.md",
-      "message": "target file not found: 'docs/nope.md'"
+      "message": "target file not found: 'docs/nope.md'",
+      "suggestion": {
+        "status": "auto_suggestion",
+        "candidates": [
+          {"path": "docs/guide.md", "anchor": null, "path_distance": 1, "anchor_distance": 0, "score": 1},
+          {"path": "README.md", "anchor": null, "path_distance": 2, "anchor_distance": 0, "score": 2}
+        ]
+      }
     },
     {
       "type": "self_reference",
@@ -77,23 +96,32 @@ curl -s -X POST http://localhost:8000/checks \
       "line": 4,
       "link": "README.md",
       "resolved": "README.md",
-      "message": "link points to the file itself"
+      "message": "link points to the file itself",
+      "suggestion": null
     },
     {
       "type": "duplicate_anchor",
       "source": "docs/guide.md",
-      "line": 5,
+      "line": 4,
       "link": "#usage",
       "resolved": "docs/guide.md",
-      "message": "duplicate anchor '#usage' (first defined at line 3); this heading is reachable as '#usage-1'"
+      "message": "duplicate anchor '#usage' (first defined at line 3); this heading is reachable as '#usage-1'",
+      "suggestion": null
     },
     {
       "type": "missing_target",
       "source": "docs/guide.md",
-      "line": 8,
+      "line": 7,
       "link": "#nope",
       "resolved": "docs/guide.md#nope",
-      "message": "anchor '#nope' not found in 'docs/guide.md'"
+      "message": "anchor '#nope' not found in 'docs/guide.md'",
+      "suggestion": {
+        "status": "ambiguous",
+        "candidates": [
+          {"path": "docs/guide.md", "anchor": "guide", "path_distance": 0, "anchor_distance": 4, "score": 4},
+          {"path": "README.md", "anchor": "project", "path_distance": 2, "anchor_distance": 5, "score": 7}
+        ]
+      }
     }
   ]
 }
@@ -107,7 +135,7 @@ curl -s -X POST http://localhost:8000/checks \
 curl -s http://localhost:8000/checks/9f2c1e4a7b8d4f01
 ```
 
-返回与 `POST /checks` 相同的结构；ID 不存在时返回 `404`。
+返回与 `POST /checks` 相同的结构（含已持久化的修复建议）；ID 不存在时返回 `404`。
 
 ### 其他端点
 
@@ -129,6 +157,7 @@ curl -s http://localhost:8000/checks/9f2c1e4a7b8d4f01
 
 - 仅支持 ATX 标题（`# ...`），不支持 setext 标题（`===` / `---` 下划线式）。
 - 行内解析是启发式的：不支持跨行链接目标、链接文本中的嵌套方括号；4 空格缩进代码块不视为代码。
+- 修复建议仅覆盖 `missing_target` 诊断，且只做离线字符串相似度排序，不理解语义。
 - SQLite 单写入者，默认单 worker 运行；如需多副本部署请共享数据卷或自行扩展存储层。
 
 ## 运行测试
@@ -144,10 +173,11 @@ pytest
 app/
   main.py     # FastAPI 路由与请求校验
   checker.py  # 路径规范化、跨文件解析、诊断生成
+  suggest.py  # missing_target 修复建议（编辑距离评分与排序）
   parser.py   # Markdown 标题/锚点/链接解析（GitHub 风格 slug）
   db.py       # SQLite 存取层
   models.py   # Pydantic 请求/响应模型
-tests/        # pytest：解析器、检查器、API 三层测试
+tests/        # pytest：解析器、检查器、建议、API 四层测试
 Dockerfile
 docker-compose.yml
 ```

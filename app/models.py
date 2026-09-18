@@ -34,6 +34,24 @@ class CheckRequest(BaseModel):
     }
 
 
+class SuggestionCandidateOut(BaseModel):
+    path: str = Field(..., description="Candidate file from the submitted collection")
+    anchor: str | None = Field(None, description="Closest anchor in the candidate file "
+                                                 "(null when the link has no fragment)")
+    path_distance: int = Field(..., description="Segment-level edit distance between "
+                                                "the broken target and the candidate path")
+    anchor_distance: int = Field(..., description="Character-level edit distance between "
+                                                  "the link fragment and the candidate anchor")
+    score: int = Field(..., description="path_distance + anchor_distance")
+
+
+class SuggestionOut(BaseModel):
+    status: str = Field(..., description="auto_suggestion: unique best candidate within "
+                                         "threshold; ambiguous: otherwise")
+    candidates: list[SuggestionCandidateOut] = Field(
+        ..., description="Up to 3 candidates, ordered by (score, path)")
+
+
 class DiagnosticOut(BaseModel):
     type: str = Field(..., description="missing_target | duplicate_anchor | "
                                        "path_escape | self_reference")
@@ -42,6 +60,9 @@ class DiagnosticOut(BaseModel):
     link: str = Field(..., description="The link exactly as written in the document")
     resolved: str | None = Field(None, description="Normalized target path, if resolvable")
     message: str
+    suggestion: SuggestionOut | None = Field(
+        None, description="Fix candidates for missing_target when requested "
+                          "with suggest=true; null otherwise")
 
 
 class CheckOut(BaseModel):

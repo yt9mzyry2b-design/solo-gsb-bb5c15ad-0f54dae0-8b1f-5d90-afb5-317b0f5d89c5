@@ -6,6 +6,8 @@ services:
       - "8000:8000"
     environment:
       LINKCHECK_DB: /data/linkcheck.db
+      # 默认开启 missing_target 修复建议（单次请求可用 ?suggest=false 覆盖）
+      LINKCHECK_SUGGEST: "1"
     volumes:
       - linkcheck-data:/data
     restart: unless-stopped
