@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 
-from .checker import check_files, normalize_path, summarize
+from .checker import attach_suggestions, check_files, normalize_path, summarize
 from .db import Store
 from .models import CheckOut, CheckRequest, CheckSummary
 
@@ -19,7 +19,8 @@ app = FastAPI(
     description=(
         "Checks a submitted collection of Markdown files for broken cross-file "
         "links: missing targets, duplicate heading anchors, paths escaping the "
-        "document root, and self-referencing links. Results are stored in "
+        "document root, and self-referencing links. Optionally suggests likely "
+        "fix targets for missing links (suggest=true). Results are stored in "
         "SQLite and can be retrieved by check ID. No external services required."
     ),
 )
@@ -57,6 +58,8 @@ def create_check(req: CheckRequest, store: Store = Depends(get_store)) -> CheckO
         raise HTTPException(status_code=422, detail=errors)
 
     diagnostics = check_files(files)
+    if req.suggest:
+        attach_suggestions(files, diagnostics)
     check_id = uuid.uuid4().hex[:16]
     created_at = datetime.now(timezone.utc).isoformat()
     summary = summarize(diagnostics)

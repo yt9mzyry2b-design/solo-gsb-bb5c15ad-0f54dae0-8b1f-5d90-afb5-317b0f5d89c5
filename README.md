@@ -1,6 +1,6 @@
 # Markdown Link Checker
 
-一个自包含的 Markdown 文档链接检查 API：客户端提交一组带路径的 Markdown 文件，服务解析标题锚点、相对路径与显式 fragment，按规范化路径解析跨文件引用并输出诊断。结果持久化在 SQLite 中，可按检查 ID 查询。除 Python 依赖外无任何外部服务（无网络校验、无外部数据库）。
+一个自包含的 Markdown 文档链接检查 API：客户端提交一组带路径的 Markdown 文件，服务解析标题锚点、相对路径与显式 fragment，按规范化路径解析跨文件引用并输出诊断；可选地为缺失目标计算修复建议（`suggest=true`）。结果持久化在 SQLite 中，可按检查 ID 查询。除 Python 依赖外无任何外部服务（无网络校验、无外部数据库）。
 
 ## 诊断类型
 
@@ -11,7 +11,7 @@
 | `path_escape` | 相对路径经规范化后越出提交的文档根（如 `../../secret.md`） |
 | `self_reference` | 自循环引用：链接指向文件自身，或指向链接所在章节自己的锚点 |
 
-每条诊断都包含：`source`（来源文件）、`line`（1 起始行号）、`link`（文档中原始写法，可复现）、`resolved`（规范化后的目标路径，可空）和 `message`。
+每条诊断都包含：`source`（来源文件）、`line`（1 起始行号）、`link`（文档中原始写法，可复现）、`resolved`（规范化后的目标路径，可空）、`message` 和 `suggestion`（修复建议，仅当检查以 `suggest=true` 运行且诊断为 `missing_target` 时非空）。
 
 ## 快速开始
 
@@ -31,7 +31,7 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-数据库路径由环境变量 `LINKCHECK_DB` 控制，默认 `./linkcheck.db`。
+数据库路径由环境变量 `LINKCHECK_DB` 控制，默认 `./linkcheck.db`。`auto_suggestion` 的判定阈值由 `LINKCHECK_SUGGEST_MAX_DISTANCE` 控制，默认 `2`（见下文「修复建议」）。
 
 ## API 使用
 
@@ -69,7 +69,8 @@ curl -s -X POST http://localhost:8000/checks \
       "line": 3,
       "link": "docs/nope.md",
       "resolved": "docs/nope.md",
-      "message": "target file not found: 'docs/nope.md'"
+      "message": "target file not found: 'docs/nope.md'",
+      "suggestion": null
     },
     {
       "type": "self_reference",
@@ -77,7 +78,8 @@ curl -s -X POST http://localhost:8000/checks \
       "line": 4,
       "link": "README.md",
       "resolved": "README.md",
-      "message": "link points to the file itself"
+      "message": "link points to the file itself",
+      "suggestion": null
     },
     {
       "type": "duplicate_anchor",
@@ -85,7 +87,8 @@ curl -s -X POST http://localhost:8000/checks \
       "line": 5,
       "link": "#usage",
       "resolved": "docs/guide.md",
-      "message": "duplicate anchor '#usage' (first defined at line 3); this heading is reachable as '#usage-1'"
+      "message": "duplicate anchor '#usage' (first defined at line 3); this heading is reachable as '#usage-1'",
+      "suggestion": null
     },
     {
       "type": "missing_target",
@@ -93,13 +96,59 @@ curl -s -X POST http://localhost:8000/checks \
       "line": 8,
       "link": "#nope",
       "resolved": "docs/guide.md#nope",
-      "message": "anchor '#nope' not found in 'docs/guide.md'"
+      "message": "anchor '#nope' not found in 'docs/guide.md'",
+      "suggestion": null
     }
   ]
 }
 ```
 
 提交的路径会先规范化（`\` → `/`、折叠 `.`/`..`、去前导 `/`）；规范化后重复或越出根目录的路径会被 `422` 拒绝。
+
+### 修复建议（`suggest=true`）
+
+请求体加入 `"suggest": true` 后，每条 `missing_target` 诊断会附带一个 `suggestion` 对象，其余诊断的 `suggestion` 为 `null`。评分规则：
+
+- 对缺失目标，把本次提交的**每个文件**都作为候选分别打分：`score = 路径段距离 + 锚点距离`（越小越接近）；
+  - **路径段距离**：失效目标的文件名与候选文件 basename 的 Levenshtein 编辑距离（区分大小写，与路径匹配语义一致）；
+  - **锚点距离**：链接的 fragment 与候选文件各锚点 slug 的最小编辑距离；链接无 fragment 时为 0，`anchor` 字段给出候选文件最接近的锚点。
+- 候选按 `score` 升序、`score` 相同再按完整路径字典序稳定排序，最多返回 3 个；
+- 唯一最佳候选的 `score` 不超过阈值 `LINKCHECK_SUGGEST_MAX_DISTANCE`（默认 `2`）时 `kind` 为 `auto_suggestion`，否则为 `ambiguous`；
+- 评分只依赖字符串编辑距离，无随机性：同一输入必然得到同一 `score`（可复现）。
+
+建议随诊断一并写入 SQLite，`GET /checks/{id}` 返回完全一致的结果。
+
+```bash
+curl -s -X POST http://localhost:8000/checks \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "suggest": true,
+    "files": [
+      {"path": "README.md", "content": "# Project\n\nSee the [guide](docs/guid.md#usag).\n"},
+      {"path": "docs/guide.md", "content": "# Guide\n\n## Usage\n"}
+    ]
+  }'
+```
+
+响应中唯一的诊断（`diagnostics[0]`）：
+
+```json
+{
+  "type": "missing_target",
+  "source": "README.md",
+  "line": 3,
+  "link": "docs/guid.md#usag",
+  "resolved": "docs/guid.md",
+  "message": "target file not found: 'docs/guid.md'",
+  "suggestion": {
+    "kind": "auto_suggestion",
+    "candidates": [
+      {"path": "docs/guide.md", "score": 2, "path_distance": 1, "anchor_distance": 1, "anchor": "usage"},
+      {"path": "README.md", "score": 13, "path_distance": 6, "anchor_distance": 7, "anchor": "project"}
+    ]
+  }
+}
+```
 
 ### `GET /checks/{check_id}` — 按检查 ID 查询结果
 
@@ -145,9 +194,10 @@ app/
   main.py     # FastAPI 路由与请求校验
   checker.py  # 路径规范化、跨文件解析、诊断生成
   parser.py   # Markdown 标题/锚点/链接解析（GitHub 风格 slug）
+  suggest.py  # 缺失目标的修复建议（编辑距离评分与排序）
   db.py       # SQLite 存取层
   models.py   # Pydantic 请求/响应模型
-tests/        # pytest：解析器、检查器、API 三层测试
+tests/        # pytest：解析器、检查器、建议、API 四层测试
 Dockerfile
 docker-compose.yml
 ```

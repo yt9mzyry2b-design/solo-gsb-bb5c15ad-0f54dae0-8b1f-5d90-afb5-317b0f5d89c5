@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     environment:
       LINKCHECK_DB: /data/linkcheck.db
+      LINKCHECK_SUGGEST_MAX_DISTANCE: "2"
     volumes:
       - linkcheck-data:/data
     restart: unless-stopped

@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from urllib.parse import unquote
 
 from .parser import ParsedFile, parse_markdown
+from .suggest import Suggestion, suggest_fixes
 
 MISSING_TARGET = "missing_target"
 DUPLICATE_ANCHOR = "duplicate_anchor"
@@ -34,6 +35,7 @@ class Diagnostic:
     link: str            # the link exactly as written ("#anchor" for duplicates)
     message: str
     resolved: str | None = None  # normalized target path, if resolvable
+    suggestion: Suggestion | None = None  # optional fix suggestion (missing_target)
 
     def as_dict(self) -> dict:
         return {
@@ -43,6 +45,7 @@ class Diagnostic:
             "link": self.link,
             "resolved": self.resolved,
             "message": self.message,
+            "suggestion": self.suggestion.as_dict() if self.suggestion else None,
         }
 
 
@@ -169,6 +172,30 @@ def check_files(files: dict[str, str]) -> list[Diagnostic]:
 
     diagnostics.sort(key=lambda d: (d.source, d.line, d.type, d.link))
     return diagnostics
+
+
+def attach_suggestions(files: dict[str, str], diagnostics: list[Diagnostic]) -> None:
+    """Attach fix suggestions to every ``missing_target`` diagnostic in place.
+
+    Each missing target is compared against every file in the submitted
+    collection: the basename of the broken target vs. the candidate's
+    basename (path-segment distance) plus the link's fragment vs. the
+    candidate's anchor slugs (anchor distance). See ``suggest.py`` for the
+    scoring rules.
+    """
+    slugs_by_path = {
+        path: [h.slug for h in parse_markdown(path, content).headings]
+        for path, content in files.items()
+    }
+    for d in diagnostics:
+        if d.type != MISSING_TARGET or d.resolved is None:
+            continue
+        # Re-resolve the raw link to recover the decoded fragment; the
+        # diagnostic's resolved value only carries it for missing anchors.
+        _, resolved, fragment = resolve_target(d.source, d.link)
+        if resolved is None:
+            continue
+        d.suggestion = suggest_fixes(files, slugs_by_path, resolved, fragment)
 
 
 def summarize(diagnostics: list[Diagnostic]) -> dict[str, int]:

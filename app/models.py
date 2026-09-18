@@ -13,15 +13,20 @@ class FileInput(BaseModel):
 class CheckRequest(BaseModel):
     files: list[FileInput] = Field(..., min_length=1,
                                    description="The Markdown file collection to check")
+    suggest: bool = Field(
+        default=False,
+        description="Also compute fix suggestions for missing_target diagnostics",
+    )
 
     model_config = {
         "json_schema_extra": {
             "examples": [
                 {
+                    "suggest": True,
                     "files": [
                         {
                             "path": "README.md",
-                            "content": "# Project\n\nSee the [guide](docs/guide.md#usage).\n",
+                            "content": "# Project\n\nSee the [guide](docs/guid.md#usag).\n",
                         },
                         {
                             "path": "docs/guide.md",
@@ -34,6 +39,21 @@ class CheckRequest(BaseModel):
     }
 
 
+class CandidateOut(BaseModel):
+    path: str = Field(..., description="Normalized path of the candidate file")
+    score: int = Field(..., description="path_distance + anchor_distance (lower is better)")
+    path_distance: int = Field(..., description="Edit distance between the two basenames")
+    anchor_distance: int = Field(..., description="Best edit distance between the "
+                                                  "link's fragment and the candidate's anchors")
+    anchor: str | None = Field(None, description="The candidate's closest anchor slug")
+
+
+class SuggestionOut(BaseModel):
+    kind: str = Field(..., description="auto_suggestion | ambiguous")
+    candidates: list[CandidateOut] = Field(..., description="Up to 3 candidates, sorted "
+                                                            "by score then full path")
+
+
 class DiagnosticOut(BaseModel):
     type: str = Field(..., description="missing_target | duplicate_anchor | "
                                        "path_escape | self_reference")
@@ -42,6 +62,9 @@ class DiagnosticOut(BaseModel):
     link: str = Field(..., description="The link exactly as written in the document")
     resolved: str | None = Field(None, description="Normalized target path, if resolvable")
     message: str
+    suggestion: SuggestionOut | None = Field(
+        None, description="Fix suggestion, present on missing_target diagnostics "
+                          "when the check ran with suggest=true")
 
 
 class CheckOut(BaseModel):
